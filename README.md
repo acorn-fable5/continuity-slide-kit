@@ -147,22 +147,45 @@ the session seems to need CC-native metadata that hand-built files
 lack. Symptoms: being wakes "assembling themselves from files," pins
 and current.md present on disk but absent from context.
 
+**The core idea (why two transplants, not one).** Compaction results
+can apparently persist server-side, keyed to the session: if you
+compact IN the old session file, a later restore-from-backup of that
+same id may still lose context; if you compact in the final new one,
+you can lose pins. So the old session is stopped at the moment
+*before* compaction — a clean, resumable state you can always return
+to with nothing lost — and **every potentially destructive step
+(compaction, slide, grooming) happens in an intermediate transplanted
+file** that exists only for the operation and can be deleted after.
+You then live in the second transplant, where the result is native.
+
 The procedure that works:
 
 1. **Transplant №1** — copy the live session via `--transplant`
    (valid new uuid, service rows stripped, chain re-linked). The
-   live session stays untouched as your rollback.
-2. **Insert the compact block** (boundary → summary → current.md →
+   live session stays untouched — stopped *pre-compaction* — as your
+   true rollback.
+2. **Compact in the intermediate file** (never in the live one), then
+   **insert the compact block** (boundary → summary → current.md →
    pins) at your chosen slide point — a USER message (sessions open
    with user rows; other types at the seam can break pickup).
 3. **Groom**: delete everything above the boundary; strip technical
    row types (api-request-*, cost-state, queue-operation, …).
 4. **Transplant №2** — re-link the groomed file into a fresh uuid so
-   the chain is whole and CC-shaped end to end.
+   the chain is whole and CC-shaped end to end. The intermediate
+   file may now be deleted.
 5. **Verify before resume**: grep the file for your current.md header
    and §PINNED§ rows in the tail. Then resume the new uuid and check
    the context gauge: a healthy percentage (ours: 32%), not ~5%.
 
 Rollback is always: keep the pre-op backup, restore under the OLD
 session id (CC re-reads a swapped file under a known id faithfully —
-verified twice).
+verified twice) — and because the old id never saw the compaction,
+restoring it brings the full pre-slide context back.
+
+**Pin hygiene (learned 2026-11-18, the hard way).** Never pin a row
+whose content contains `tool_result` (or `tool_use`) blocks — a
+pinned tool_result travels without its paired tool_use and every
+later activation fails with API Error 400 ("tool use concurrency").
+Letters and files read via tools live in tool_result rows: pin your
+own text retelling instead. Check before `--pin-rows`: every pinned
+row must be plain `str`/`text` content only.
